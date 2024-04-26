@@ -59,8 +59,8 @@ clin_query <- GDCquery(project = "TCGA-OV",
   data.type = "Clinical Supplement",
   data.format = 'BCR Biotab')
 
-# GDCdownload(clin_query, directory = "/analysis_data/Ovarian_GDCdata")
-
+# Edit paths as needed.
+GDCdownload(clin_query, directory = "/analysis_data/Ovarian_GDCdata")
 clinical.BCRtab.all <- GDCprepare(clin_query, directory = "/analysis_data/Ovarian_GDCdata/")
 ```
 
@@ -71,8 +71,8 @@ rna_query <- GDCquery(project ="TCGA-OV",
   data.type = "Gene Expression Quantification",
   workflow.type = "STAR - Counts")
 
-# GDCdownload(rna_query, directory = "/analysis_data/Ovarian_GDCdata/")
-
+# Edit paths as needed.
+GDCdownload(rna_query, directory = "/analysis_data/Ovarian_GDCdata/")
 rna_se <- GDCprepare(rna_query, directory = "/analysis_data/Ovarian_GDCdata/")
 ```
 
@@ -233,8 +233,8 @@ consensus_labels <- as.data.frame(matrix(nrow = length(conf_patients),
                                          dimnames = list(conf_patients, "consensus")))
 consensus_labels$consensus <- consensus_all$consensusOV.subtypes[conf_indices]
 consensus_labels$consensus <- gsub("_.*", "", consensus_labels$consensus)
-z
-# Export consensus labels.
+
+# Export consensus labels. Edit paths as needed.
 write.csv(consensus_labels, file = "consensus_labels.csv")
 
 ################################################################################
@@ -245,6 +245,6 @@ counts_export <- rna_counts[, colnames(rna_counts) %in% conf_patients]
 counts_export <- counts_export[rownames(rna_counts) %in% markers$gene, ]
 rownames(counts_export) <- markers$gene_names[match(rownames(counts_export), markers$gene)]
 
-# Export counts.
-write.csv(consensus_labels, file = "counts.csv")
+# Export counts. Edit paths as needed.
+write.csv(counts_export, file = "counts.csv")
 ```
