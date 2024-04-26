@@ -1,0 +1,250 @@
+---
+title: "QBIO 490: Final Project"
+subtitle: "Differential Expression Analysis of TCGA Ovarian Carcinoma Data"
+author: "Daven Pan, Aman Sharma, Joseph Kim, and Justin Wang"
+output:
+  pdf_document:
+    highlight: arrow
+---
+
+# Configuration and Packages
+```{r message=FALSE, warning=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+install.packages("BiocManager")
+
+if (!require("TCGAbiolinks", quietly = TRUE))
+BiocManager::install("TCGAbiolinks")
+
+if (!require("Seurat", quietly = TRUE))
+install.packages("Seurat")
+
+if (!require("ggplot2", quietly = TRUE))
+install.packages("ggplot2")
+
+if (!require("dplyr", quietly = TRUE))
+install.packages("dplyr")
+
+if (!require("org.Hs.eg.db", quietly = TRUE))
+BiocManager::install("org.Hs.eg.db")
+
+if (!require("AnnotationDbi", quietly = TRUE))
+BiocManager::install("AnnotationDbi")
+
+if (!require("matrixStats", quietly = TRUE))
+install.packages("matrixStats")
+
+if (!require("NMF", quietly = TRUE))
+install.packages("NMF")
+
+if (!require("consensusOV", quietly = TRUE))
+BiocManager::install("consensusOV")
+
+library(BiocManager)
+library(TCGAbiolinks)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(matrixStats)
+library(NMF)
+library(consensusOV)
+```
+
+# TCGA Data Retrieval
+```{r message=FALSE}
+# Download clinical data.
+clin_query <- GDCquery(project = "TCGA-OV",
+  data.category = "Clinical",
+  data.type = "Clinical Supplement",
+  data.format = 'BCR Biotab')
+
+# GDCdownload(clin_query, directory = "/analysis_data/Ovarian_GDCdata")
+
+clinical.BCRtab.all <- GDCprepare(clin_query, directory = "/analysis_data/Ovarian_GDCdata/")
+```
+
+```{r message=FALSE}
+# Download RNA expression data.
+rna_query <- GDCquery(project ="TCGA-OV",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts")
+
+# GDCdownload(rna_query, directory = "/analysis_data/Ovarian_GDCdata/")
+
+rna_se <- GDCprepare(rna_query, directory = "/analysis_data/Ovarian_GDCdata/")
+```
+
+```{r}
+# Disinstantiate query objects.
+remove(clin_query, rna_query)
+```
+
+# Data Initialization and Cleaning
+```{r, message = FALSE}
+################################################################################
+# Create clinical dataframe.
+rna_clinical <- as.data.frame(rna_se@colData)
+
+# Remove "nested lists":
+rna_clinical <- subset(rna_clinical, select = -c(treatments, primary_site, disease_type))
+
+################################################################################
+# Create gene dataframe.
+rna_genes <- as.data.frame(rna_se@rowRanges@elementMetadata)
+
+# Remove version numbers from ENSEMBL IDs.
+rna_genes$gene_id <- gsub("\\..*", "", rna_genes$gene_id)
+
+# Deduplicate ENSEMBL IDs and update rownames.
+dup_mask <- which(duplicated(rna_genes$gene_id) == FALSE)
+rna_genes <- rna_genes[dup_mask, ]
+rownames(rna_genes) <- rna_genes$gene_id
+
+################################################################################
+# Create counts dataframe.
+rna_counts <- as.data.frame(rna_se@assays@data$unstranded)
+rna_counts <- rna_counts[dup_mask, ]
+
+# Update row and column names to reflect ENSEMBL IDs and patient barcodes.
+rownames(rna_counts) <- rownames(rna_genes)
+colnames(rna_counts) <- rownames(rna_clinical)
+
+################################################################################
+# Filter genes detected in fewer than ten patients.
+rna_counts <- rna_counts[rowSums(rna_counts > 0) >= 10, ]
+rna_genes <- rna_genes[rownames(rna_genes) %in% rownames(rna_counts), ]
+
+# Convert ENSEMBL IDs to Entrez IDs.
+entrez <- AnnotationDbi::select(org.Hs.eg.db, 
+                                keys = rownames(rna_counts), 
+                                columns = c("ENSEMBL", "ENTREZID", "SYMBOL"), 
+                                keytype = "ENSEMBL", 
+                                multiVals = "first")
+
+# Filter NA conversions and de-duplicate genes.
+entrez <- entrez[which(is.na(entrez$ENTREZID) == FALSE), ]
+entrez <- entrez[which(duplicated(entrez$ENTREZID) == FALSE), ]
+
+# Subset counts to include only converted genes.
+rna_counts <- subset(rna_counts, rownames(rna_counts) %in% entrez$ENSEMBL)
+rna_genes <- subset(rna_genes, rna_genes$gene_id %in% entrez$ENSEMBL)
+
+# Update rownames in counts and gene dataframes.
+rownames(rna_counts) <- entrez$ENTREZID[match(rownames(rna_counts), entrez$ENSEMBL)]
+rownames(rna_genes) <- entrez$ENTREZID[match(rownames(rna_genes), entrez$ENSEMBL)]
+rna_genes$entrez_id <- entrez$ENTREZID[entrez$ENTREZID %in% rownames(rna_genes)]
+
+################################################################################
+# Disinstantiate temporary objects.
+rm(entrez, rna_clinical)
+```
+
+# Preprocessing and Clustering
+```{r message=FALSE, warning=FALSE}
+################################################################################
+# Select genes with the highest variability across patients.
+rna_counts <- as.data.frame(NormalizeData(rna_counts))
+var_features <- FindVariableFeatures(rna_counts)
+var_features <- top_n(var_features, 5000, wt = vst.variance.standardized)
+rna_counts <- rna_counts[rownames(rna_counts) %in% rownames(var_features), ]
+
+################################################################################
+# Run non-negative matrix factorization clustering for 100 iterations.
+nmf_model <- nmf(rna_counts, rank = 4, nrun = 100, .options ='vP' , method = "snmf/r")
+consensusmap(nmf_model, tracks = "consensus:", Rowv = FALSE)
+
+# Filter patients based on a silhouette width threshold after visually examining distribution.
+sil <- as.data.frame(silhouette(nmf_model))
+ggplot(data = sil, aes(x = sil$sil_width)) +
+  geom_histogram(fill="#69b3a2", color = "#ffffff", alpha=0.6, bins = 10) +
+  labs(x = "Silhoutte Width", y = "Count", title = "NMF Silhouette Widths") +
+  theme_minimal()
+sil <- sil[sil$sil_width >= 0.3, ]
+
+# Extract basis and mixture coefficient matrices.
+nmf_w <- basis(nmf_model)
+nmf_h <- t(coef(nmf_model))
+colnames(nmf_h) <- paste0("NMF_", paste0("",1:4))
+
+# Subset counts and mixture coefficient matrices from silhouette width.
+nmf_h <- nmf_h[rownames(nmf_h) %in% rownames(sil), ]
+rna_counts_subset <- rna_counts[, colnames(rna_counts) %in% rownames(sil)]
+
+################################################################################
+# Initialize Seurat object.
+ovarian <- CreateSeuratObject(rna_counts_subset, project = "TCGA_Ovarian")
+
+# Add NMF matrices as a reduction.
+ovarian@reductions$nmf <- CreateDimReducObject(
+  embeddings = nmf_h,
+  loadings = nmf_w,
+  key = "NMF_",
+  assay = "RNA"
+)
+
+# Find neighbors and run UMAP on the NMF reduction.
+ovarian <- FindNeighbors(ovarian, reduction = "nmf", dims = 1:4, k.param = 4)
+ovarian <- RunUMAP(ovarian, reduction = "nmf", dims = 1:4)
+
+# Set active idents to NMF-assigned clusters and visualize.
+ovarian <- SetIdent(ovarian, cells = rownames(nmf_h), value = paste0("NMF_", apply(nmf_h, 1, which.max)))
+DimPlot(ovarian, reduction = "umap")
+
+################################################################################
+# Disinstantiate temporary objects.
+rm(sil)
+```
+
+# Differential Expression Analysis
+```{r message=FALSE, warning=FALSE}
+# Find differentially expressed genes by cluster.
+markers <- FindAllMarkers(ovarian, slot = "counts")
+markers$gene_names <- mapIds(org.Hs.eg.db, keys = markers$gene, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
+
+# Rename idents based on visual inspection of subtype markers.
+ovarian <- RenameIdents(ovarian,
+                        "NMF_1" = "IMR",
+                        "NMF_2" = "MES",
+                        "NMF_3" = "PRO",
+                        "NMF_4" = "DIF")
+
+# Visualize annotated clusters.
+DimPlot(ovarian, reduction = "umap")
+```
+
+# Consensus Labels and Export Preparation
+```{r}
+################################################################################
+# Consensus classifier from Chen et al., 2018 (Clin Cancer Res.).
+
+# Determine consensus for all patients.
+consensus_all <- get.consensus.subtypes(rna_counts, rownames(rna_counts))
+
+# Select patients with predictive confidence > 0.5. 
+conf_mask <- apply(consensus_all$rf.probs, 1, max) >= 0.5
+conf_patients <- names(conf_mask[conf_mask == TRUE])
+conf_indices <- which(conf_mask == TRUE)
+
+# Extract consensus labels for high-confidence patients.
+consensus_labels <- as.data.frame(matrix(nrow = length(conf_patients), 
+                                         ncol = 1, 
+                                         dimnames = list(conf_patients, "consensus")))
+consensus_labels$consensus <- consensus_all$consensusOV.subtypes[conf_indices]
+consensus_labels$consensus <- gsub("_.*", "", consensus_labels$consensus)
+z
+# Export consensus labels.
+write.csv(consensus_labels, file = "consensus_labels.csv")
+
+################################################################################
+# Subset counts for high-confidence patients.
+counts_export <- rna_counts[, colnames(rna_counts) %in% conf_patients]
+  
+# Subset counts for marker genes.
+counts_export <- counts_export[rownames(rna_counts) %in% markers$gene, ]
+rownames(counts_export) <- markers$gene_names[match(rownames(counts_export), markers$gene)]
+
+# Export counts.
+write.csv(consensus_labels, file = "counts.csv")
+```
